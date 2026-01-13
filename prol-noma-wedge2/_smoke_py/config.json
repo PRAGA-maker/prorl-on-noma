@@ -1,0 +1,29 @@
+{
+  "seed": 0,
+  "device": "cpu",
+  "task": "reverse_digits",
+  "steps": 2,
+  "batch_size": 4,
+  "prompt_len": 6,
+  "answer_len": 6,
+  "d_model": 32,
+  "n_layers": 1,
+  "dropout": 0.1,
+  "lr": 0.0003,
+  "betas": [
+    0.9,
+    0.999
+  ],
+  "weight_decay": 0.0,
+  "variant": "A",
+  "beta_kl": 0.02,
+  "update_epochs": 1,
+  "minibatch_size": 4,
+  "clip_ratio": 0.2,
+  "baseline_ema": 0.95,
+  "reset_every": 2,
+  "optimizer_reset": "keep",
+  "soft_reset_factor": 0.2,
+  "naive_ref_each_epoch": false,
+  "temperature": 1.0
+}

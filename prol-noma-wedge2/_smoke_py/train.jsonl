@@ -1,0 +1,2 @@
+{"step": 1, "reward_mean": 0.0, "baseline": 0.0, "pg_loss": -0.0, "kl_mean": 1.9868215517249155e-08, "entropy_proxy": 3.232243299484253, "loss": 3.9736430812453705e-10, "policy_forwards": 7, "ref_forwards": 1, "sec_step": 6.374749660491943, "sec_total": 6.374754428863525}
+{"step": 2, "reward_mean": 0.0, "baseline": 0.0, "pg_loss": -0.0, "kl_mean": 9.934107758624577e-09, "entropy_proxy": 3.0262393951416016, "loss": 1.9868215406226852e-10, "policy_forwards": 14, "ref_forwards": 2, "sec_step": 6.3981287479400635, "sec_total": 12.774109363555908}

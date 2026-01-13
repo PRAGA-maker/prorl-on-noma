@@ -1,0 +1,33 @@
+seed: 0
+device: cpu
+
+task: reverse_digits
+steps: 1000
+batch_size: 32
+prompt_len: 12
+answer_len: 12
+
+model:
+  d_model: 64
+  n_layers: 1
+  dropout: 0.1
+
+optim:
+  lr: 3.0e-4
+  betas: [0.9, 0.999]
+  weight_decay: 0.0
+
+algo:
+  variant: A        # A|B|C
+  beta_kl: 0.02     # KL strength
+  update_epochs: 2  # PPO-like multiple passes
+  minibatch_size: 16
+  clip_ratio: 0.2   # PPO clip for ratio term
+  adv_baseline: ema # ema|mean
+  baseline_ema: 0.95
+
+  reset_every: 400
+  optimizer_reset: keep    # keep|hard|soft
+  soft_reset_factor: 0.2
+
+  naive_ref_each_epoch: false
