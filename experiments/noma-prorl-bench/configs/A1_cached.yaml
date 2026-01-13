@@ -1,0 +1,8 @@
+# A1: cached reference logprobs once per rollout (normal)
+outdir: runs/A1
+variant: A
+ref_compute: cached
+steps: 400
+reset_every: 200
+opt_reset: keep
+task: reverse_digits

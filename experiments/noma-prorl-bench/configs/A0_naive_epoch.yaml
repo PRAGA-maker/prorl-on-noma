@@ -1,0 +1,8 @@
+# A0: naive reference logprob recomputation each PPO epoch (wasteful)
+outdir: runs/A0
+variant: A
+ref_compute: naive_epoch
+steps: 400
+reset_every: 200
+opt_reset: keep
+task: reverse_digits

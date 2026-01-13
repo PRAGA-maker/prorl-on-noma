@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noma-prorl-bench"
+version = "0.1.0"
+description = "Scoped benchmark for ProRL-style reference resets + KL and optimizer-state semantics"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["torch", "numpy", "pyyaml", "matplotlib"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}

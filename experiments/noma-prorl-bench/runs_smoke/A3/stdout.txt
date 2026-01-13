@@ -1,0 +1,1 @@
+[00001] reward_mean=0.000 rate=0.000 KL_ref=0.0000 KL_old=0.0000 roll_ref_fw=1 train_ref_fw=0 tok/s=5.8
