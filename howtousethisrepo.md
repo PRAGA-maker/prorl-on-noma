@@ -524,3 +524,11 @@ external/noma/                   # Shared Noma
 - Check `experiments/EXPERIMENT_TEMPLATE.md` for experiment structure
 - See `experiments/prol-noma-wedge2/` for a complete example
 - Review APM guides in `agentcommands/.apm/guides/` for advanced usage
+
+
+
+1. **Create experiment** → Use `apm-9-manage-experiment.md`
+2. **Plan experiment** → Use `apm-1-initiate-setup.md` (Setup Agent)
+3. **Coordinate tasks** → Use `apm-2-initiate-manager.md` (Manager Agent)
+4. **Execute work** → Use `apm-3-initiate-implementation.md` (Implementation Agent)
+5. **Research** → Agent generates ChatGPT prompts, you copy-paste to ChatGPT
