@@ -646,4 +646,434 @@ If you want, next step (after this outline) is: we pick **one** of the two wedge
 [5]: https://proceedings.mlr.press/v162/nikishin22a/nikishin22a.pdf?utm_source=chatgpt.com "The Primacy Bias in Deep Reinforcement Learning"
 [6]: https://proceedings.neurips.cc/paper_files/paper/2024/file/978cc34c539fd26f0e8afb7e3905f34a-Paper-Conference.pdf?utm_source=chatgpt.com "Non-Stationary Learning of Neural Networks with Automatic ..."
 
+Additional Context from the Search Agent: 
 
+Below is a “handoff doc” you can paste straight to coding agents. I’m going to (1) nail down what the **reference reset** actually is (and what exactly gets “reset”), (2) break down **where the compute/memory cost really comes from** in real RLHF/GRPO stacks, (3) summarize **what existing systems do**, (4) map that onto **what NOMA can plausibly help with**, and (5) scope the **most principled experiments** (toy → real) that can produce a clean “cool result.”
+
+---
+
+## 0) The actual target: what problem are we solving?
+
+You’re reacting to a standard pain point in KL-regularized RLHF / GRPO / PPO-style post-training:
+
+* You want the **stability benefits of KL regularization to a reference policy** (prevents drift / reward hacking / collapse).
+* But during long/prolonged training, **the KL term can dominate** and you stop making meaningful policy progress.
+* A pragmatic trick is **reference policy reset**: periodically move the reference forward so it’s not “too far behind,” so KL stops acting like a hard leash.
+
+That’s the “reset every few hundred steps” point.
+
+### What ProRL (paper) claims the reset is
+
+ProRL explicitly motivates resets by saying the **KL term increasingly dominates** the loss and policy updates diminish; then proposes **reference policy reset**: “hard-reset the reference policy to a more recent snapshot of the online policy” **and reinitialize optimizer states**. ([arXiv][1])
+
+### What NVIDIA’s ProRL v2 blog claims the reset is
+
+NVIDIA’s ProRL v2 blog says: every ~200–500 RL steps (or when KL spikes / validation stalls), **reset the reference policy to the current policy** and **optimizer state is not cleared**. ([NVIDIA Developer][2])
+
+**Important discrepancy (principled note):**
+
+* Paper: reset reference **and** reinit optimizer state.
+* Blog: reset reference, **do not** clear optimizer.
+  These are meaningfully different “reset semantics.” You should treat them as **two real variants** (and test both).
+
+---
+
+## 1) What is being “reset” in practice?
+
+There are *two different* things that people loosely call “reset,” and mixing them causes confusion:
+
+### (A) Resetting the **reference policy**
+
+This is:
+
+* `π_ref ← snapshot(π_θ)` (often: copy weights from actor → ref model, or pointer swap)
+* Purpose: make KL penalty measure divergence to a *recent* anchor instead of the original SFT anchor.
+
+This is the reset both the ProRL paper and NVIDIA blog talk about. ([arXiv][3])
+
+### (B) Resetting the **optimizer state**
+
+This is separate:
+
+* “Hard reset” = reinitialize Adam moments to zero (and sometimes reset LR schedulers).
+* “Soft reset” = decay moments (multiply by factor) instead of zeroing.
+
+ProRL paper explicitly says optimizer states are reinitialized at reset. ([arXiv][1])
+NVIDIA blog says optimizer state is not cleared. ([NVIDIA Developer][2])
+
+### What you should tell coding agents (key clarity)
+
+When someone says “KL reset,” ask: **which** reset?
+
+* Reference reset? (`π_ref` update)
+* Optimizer reset? (Adam moments / scheduler)
+* Or both?
+
+Because the cost + behavior changes depend on which one you do.
+
+---
+
+## 2) Where the *real* cost is: reference forward vs reset ops
+
+You asked: “Is it a big operation like state, or a small cache thing?”
+
+### Cost bucket #1: The **reference-model logprob computation** (the “extra forward”)
+
+KL regularization needs tokenwise log-prob under **both**:
+
+* current policy `log π_θ(a_t|s_t)`
+* reference policy `log π_ref(a_t|s_t)`
+
+Unless you do something clever, `log π_ref` requires a **separate forward pass** through a second model (the ref copy).
+
+Most serious RL stacks expose explicit knobs for the reference logprob forward (micro-batching, offload, etc.), which is a dead giveaway that this forward is a major cost center. For example, VERL’s config docs explicitly describe:
+
+* enabling a separate reference model when KL is used
+* separate `ref.log_prob_micro_batch_size(_per_gpu)` for computing `ref_log_prob`
+* recommendations to offload ref for >7B models ([Verl][4])
+
+**Rule-of-thumb cost impact (grounded, but order-of-magnitude):**
+
+* Training step for actor is roughly **forward + backward**.
+* Backward is typically ~2× forward (varies).
+* So actor update ~3 “forward-equivalents.”
+* Adding a reference forward adds ~1 forward-equivalent.
+* That’s ~**+33%** extra compute on the training side, *if* you were already doing the actor forward for logprobs.
+* But in RLHF/GRPO pipelines, rollout generation can dominate, and reference scoring can add another big chunk depending on where it’s computed.
+
+**This is the piece you were calling “the extra reference forward.”**
+This is *not* a “small cache thing.” It’s real compute.
+
+### Cost bucket #2: The **reference reset operation** (copying weights / swapping)
+
+If reference is a full model copy, resetting reference means either:
+
+* copying weights actor → ref (O(#params)), or
+* swapping pointers (if you keep versions), or
+* updating which checkpoint ref loads from.
+
+This can be cheap-ish on a single GPU (memcpy) but can be painful in multi-GPU sharded setups (needs collectives / reshards).
+
+### Cost bucket #3: The **optimizer-state reset**
+
+If you do the ProRL-paper style optimizer reinit, that is:
+
+* allocate/zero Adam moments (often fp32)
+* potentially reinit schedulers
+
+For big models, optimizer state can be *multiple times* model weight size. Reinitializing it is not a “tiny cache;” it’s a lot of memory traffic.
+
+### Cost bucket #4 (the sleeper): **refit / reshard / weight transfer** overhead
+
+In multi-component RL systems (separate rollout engine vs training engine), a major pain is “refit” time: transferring weights between sharding layouts / engines.
+
+A concrete data point: a NeMo RL discussion reports “refit time reduced from 693s to 47s” with changes, and calls out how serious refit overhead is. ([NVIDIA Docs][5])
+
+This matters because reference resets (and frequent snapshotting) can force more frequent weight movement or re-configuration depending on architecture.
+
+---
+
+## 3) What’s happening mathematically when KL dominates?
+
+Most GRPO/PPO-ish variants effectively optimize something like:
+
+* maximize reward (advantage-weighted logprob)
+* plus/minus a KL penalty that keeps policy near reference
+
+NeMo RL’s GRPO math guide gives an explicit **per-token KL approximation** commonly used in practice:
+[
+D_{KL}(\pi_\theta||\pi_{ref}) \approx \frac{\pi_{ref}}{\pi_\theta} - \log\frac{\pi_{ref}}{\pi_\theta} - 1
+]
+and includes the KL term in the loss. ([NVIDIA Docs][6])
+
+**Why KL dominates over time (intuitive, but precise enough):**
+
+* As the policy improves reward, it tends to move away from the initial reference.
+* KL penalty grows with that divergence.
+* Eventually the gradient contribution from “don’t move further” overwhelms the gradient from “get more reward,” and updates shrink.
+
+**Reference reset is literally a hack to make KL small again** by redefining what “close” means: instead of “close to the original SFT,” it’s “close to what I was doing recently.”
+
+---
+
+## 4) What existing implementations do (patterns you can assume)
+
+Even without reading every repo, the broad architecture is consistent across TRL / VERL / NeMo RL / OpenRLHF-style systems:
+
+### Pattern 1: Reference logprobs are *usually computed once per rollout batch and cached*
+
+Because if you do multiple epochs of policy updates per batch, recomputing ref logprobs per epoch is wasteful.
+
+In TRL-style trainers, there are explicit flags like disabling dropout “useful for training with a reference model” (because nondeterminism breaks cached comparisons). ([Hugging Face][7])
+
+So the “best practice” is:
+
+* generate rollouts
+* compute `logp_policy_old` and `logp_ref` for the rollout tokens
+* store them in the batch
+* reuse across update epochs
+
+### Pattern 2: Ref model is often sharded/offloaded
+
+VERL docs explicitly recommend offload for ref for >7B. ([Verl][4])
+That implies “reference forward” is expensive enough to warrant special memory plumbing.
+
+### Pattern 3: Reference reset cadence is heuristic and ops-driven
+
+NVIDIA’s ProRL v2 blog: reset every 200–500 RL steps, or when KL spikes / validation stalls. ([NVIDIA Developer][2])
+That’s a systems heuristic, not a clean theorem.
+
+---
+
+## 5) Where NOMA actually fits (what is plausible vs not)
+
+### What NOMA *is* (relevant capability)
+
+NOMA is explicitly positioned to support:
+
+* “growable parameter buffers”
+* **preserving optimizer state** across buffer reallocations / topology changes
+* avoiding “catastrophic instability” when parameterization changes mid-training ([NVIDIA Docs][6])
+
+So NOMA is naturally about **state semantics**: what happens to optimizer moments, and how you carry them through nontrivial changes.
+
+### What NOMA probably cannot do (be honest, stay principled)
+
+If you are full-finetuning dense transformer weights and need `log π_ref` under a different set of weights than `π_θ`, you cannot magically get exact ref logprobs without doing equivalent work somewhere. The KL needs two distributions.
+
+So NOMA will not “eliminate” reference forward *in the general case*.
+
+### Two places NOMA *can* create a real wedge
+
+#### Wedge A: **Reset semantics** (optimizer state mapping) as a first-class experiment
+
+Because ProRL paper explicitly says resets include optimizer reinit, and NVIDIA blog says they do not. ([arXiv][3])
+That is screaming for an experiment:
+
+* Variant: ref reset + **hard optimizer reset**
+* Variant: ref reset + **keep optimizer state**
+* Variant: ref reset + **soft-reset moments** (scale moments, keep directionality)
+
+This is exactly the kind of “state semantics” NOMA is about. ([NVIDIA Docs][6])
+
+If you show:
+
+* “keeping optimizer state stabilizes resets”
+  or
+* “soft reset dominates both”
+  that’s a clean, publishable-ish systems result, and it’s *aligned with NOMA’s stated mission*.
+
+#### Wedge B: Avoiding the explicit reference forward by changing the anchor (algorithmic swap)
+
+This is what the toy repo you have (`prol-noma-wedge2.zip`) already encodes:
+
+* **Variant A:** explicit KL to frozen reference (costly reference scoring).
+* **Variant B:** no reference model; use behavior-policy trust region anchored on `logp_old` (collected during rollout) — eliminates `π_ref` forward entirely.
+
+This is an *algorithmic* wedge: it’s not the same objective as reference KL, but it’s a principled approximation in the regime where references are frequently reset forward (because then ref ≈ recent policy anyway).
+
+This is the “avoid extra reference forward” path, but you must be disciplined in framing:
+
+* You are not computing *the same KL*.
+* You are substituting a *moving anchor* (behavior policy / old policy), which is a different regularizer.
+
+---
+
+## 6) Prior art you need to know (so you don’t reinvent something obvious)
+
+### (1) ProRL (reference reset) — the core thing you’re targeting
+
+* ProRL explicitly: KL dominates → diminishing updates → **reference policy reset** and **optimizer reinit**. ([arXiv][1])
+
+### (2) NVIDIA ProRL v2 blog — operational guidance + different reset semantics
+
+* Reset every 200–500 RL steps
+* Reset reference to current policy
+* Optimizer state **not cleared** ([NVIDIA Developer][2])
+
+### (3) Elastic Reset (different reset concept, no explicit KL)
+
+Elastic Reset is a separate “reset family” idea:
+
+* periodically reset the *online model* to an EMA of itself, and reset EMA to initial
+* claims better reward vs drift tradeoff without the same KL objective ([arXiv][8])
+
+It’s not the same as reference KL reset, but it’s relevant because it’s another “reset solves drift/overoptimization” story. If you claim novelty, you must distinguish clearly.
+
+### (4) Systems reality: weight transfer/refit can dominate
+
+The NeMo RL refit-time discussion is an existence proof that “resetting things” can turn into giant multi-minute overhead if it triggers weight movement. ([NVIDIA Docs][5])
+
+---
+
+## 7) What I did *not* find on X (important to say plainly)
+
+You asked to search X/Twitter for notes. In practice, X is inconsistent to crawl/search reliably (often blocked/partial). I did not find a clean “canonical thread” that adds more than the ProRL paper + NVIDIA blog + RLHF systems docs above. So: don’t assume “X has the secret implementation detail.” Treat the sources above as the grounded baseline.
+
+---
+
+## 8) The experiment plan that is maximally scoped + maximally meaningful
+
+You want something a coding agent can implement in 1–2 shots and that produces a “cool” plot.
+
+### Stage 0: Toy proof (already in your zip repo)
+
+Repo implements:
+
+* toy verifiable-reward tasks (`reverse_digits`, `parity`)
+* rollout batching
+* multiple update epochs per rollout
+* reference logprob caching vs naive-per-epoch
+* reference reset cadence
+* optimizer reset semantics keep/hard/soft
+
+**Why this matters:** it isolates *bookkeeping and reset semantics* without distributed complexity.
+
+**What to measure (minimum):**
+
+* reward vs step
+* KL estimate vs step (if using explicit ref)
+* “policy update magnitude” proxy (e.g., mean |Δlogp| on batch)
+* wall-clock per step split into:
+
+  * rollout time
+  * training time
+  * reference scoring time (explicitly)
+
+### Stage 1: “Real-ish” single-GPU GRPO/TRL run (still scoped)
+
+Use a small-ish open model (0.5B–3B) and a verifiable task set (math/format checking). Keep it single GPU to avoid refit/reshard confounds.
+
+**Variants (these map cleanly onto ProRL confusion):**
+
+1. Ref reset + hard optimizer reset (paper-like)
+2. Ref reset + keep optimizer state (blog-like)
+3. Ref reset + soft optimizer reset (NOMA-meaningful)
+4. No ref reset (control)
+5. (Optional) behavior-policy anchor (no ref forward) — clearly labeled as algorithmic change
+
+**Key metric:** “continued improvement after KL would otherwise clamp.” That is literally ProRL’s motivation.
+
+### Stage 2: The “avoid extra reference forward” demo that’s actually defensible
+
+If you want to claim you avoided the ref forward, you must show:
+
+* Baseline system does explicit reference scoring forward.
+* Your variant removes that forward and keeps training stable.
+
+The toy repo’s Variant B does that by anchoring to rollout `logp_old`.
+
+**How to frame it so it’s not bullshit:**
+
+* “We replace the fixed reference KL with a behavior-policy trust region regularizer, motivated by the fact that ProRL-style reference resets move the reference forward frequently anyway.”
+* Then show: comparable reward curve, improved throughput.
+
+---
+
+## 9) What coding agents usually get wrong here (preempt them)
+
+### Mistake 1: recomputing reference logprobs every update epoch
+
+This explodes cost and is not representative. You need “compute once per rollout batch, cache, reuse.”
+
+### Mistake 2: conflating “reference reset” with “optimizer reset”
+
+They must be separate toggles.
+
+### Mistake 3: ignoring dropout nondeterminism
+
+If dropout differs between ref scoring and policy scoring, KL estimates become noisy. TRL explicitly calls out disabling dropout as useful when training with a reference model.
+
+### Mistake 4: making claims of “same objective” when switching anchors
+
+If you remove the reference model forward by anchoring to `logp_old`, it’s a different regularizer. The benefit can be real, but the claim must be correct.
+
+### Mistake 5: benchmarking “reset cost” without including real systems overhead
+
+On a single GPU, weight copy looks cheap. In real sharded systems, resets can interact with refit/weight movement and become huge. Use the NeMo RL refit discussion as the “systems caution” story.
+
+---
+
+## 10) What changed in the experiment plan after research? (big deltas)
+
+### Delta #1: You **must** treat optimizer reset semantics as an explicit axis
+
+Because paper vs blog disagree. That’s not a footnote; it’s an experiment axis.
+
+### Delta #2: “Avoid extra reference forward” is *not* a guaranteed NOMA win unless you change the algorithm
+
+If you want to truly eliminate ref forward while keeping *exact* reference KL, that’s generally not possible without approximations or architectural tricks. The clean path is:
+
+* either cache ref logprobs (standard)
+* or remove the explicit reference KL objective (Variant B-style anchor swap)
+
+So your claim should be: **NOMA helps formalize and preserve state across reset events**, and/or enables a **safe anchor swap** experiment that trades ref forward for throughput.
+
+---
+
+## 11) SEARCH-ENABLED PACKET (send this to agents verbatim)
+
+These are the web-derived facts + references that coding agents wouldn’t have without search:
+
+1. **ProRL paper**: KL dominates → diminishing updates → reference policy reset (hard reset ref to recent snapshot) **and reinitialize optimizer states**. ([arXiv][1])
+
+2. **NVIDIA ProRL v2 blog**: reset reference every 200–500 RL steps; ref reset to current policy; **optimizer state is not cleared**.
+
+3. **NeMo RL GRPO math**: explicit KL approximation and loss structure used in practice (tokenwise KL approx formula). ([NVIDIA Docs][6])
+
+4. **VERL docs**: reference model is an explicit component for KL; separate config knobs for `ref_log_prob` microbatching and recommendations for offload.
+
+5. **NOMA README**: NOMA’s stated purpose includes growable parameter buffers + preserving optimizer state across realloc/topology changes to avoid catastrophic instability. ([NVIDIA Docs][6])
+
+6. **NeMo RL systems note**: refit/weight-transfer overhead can be massive (example numbers like 693s→47s), relevant caution for any scheme that increases weight movement frequency.
+
+7. **Elastic Reset**: another “reset family” approach (EMA-based) that mitigates drift without explicit KL objective; relevant prior art to cite/contrast.
+
+### Links (allowed here in code block so agents can click)
+
+```text
+ProRL (paper, arXiv HTML): https://arxiv.org/html/2505.24864v1
+NVIDIA ProRL v2 blog: https://developer.nvidia.com/blog/scaling-llm-reinforcement-learning-with-prolonged-training-using-prorl-v2/
+NeMo RL GRPO math guide: https://docs.nvidia.com/nemo-framework/user-guide/latest/modelalignment/grpo.html
+VERL config (reference model + ref_log_prob batching): https://verl.readthedocs.io/en/latest/examples/config.html
+NeMo RL refit-time discussion: https://github.com/NVIDIA/NeMo-RL/discussions/60
+NOMA repo README: https://github.com/pierridotite/NOMA
+Elastic Reset (arXiv): https://arxiv.org/html/2312.07551v1
+```
+
+---
+
+## 12) Concrete instructions to agents using your existing toy repo (so they don’t thrash)
+
+Your zip repo (`prol-noma-wedge2.zip`) already encodes the correct experimental axes:
+
+* Variant A: explicit reference KL
+* Variant B: behavior-policy anchor (no ref forward)
+* Variant C: reset semantics (keep/hard/soft moments)
+* Flags to force naive ref forward each epoch (expensive baseline) vs cached once per rollout (realistic)
+
+If they want to extend it:
+
+* add a “paper-like reset semantics” preset (hard reset optimizer on ref reset)
+* add a “blog-like reset semantics” preset (keep optimizer on ref reset)
+* add a “NOMA semantics” preset (soft reset moments)
+
+And instrument:
+
+* time spent in ref scoring
+* time spent in training forward/backward
+* total step wallclock
+* reward and KL curves around reset boundaries
+
+---
+
+If you come back with early curves (even toy), I can tell you quickly whether you’re seeing the *actual* ProRL phenomenon (KL clamp → reset unlocks progress) or just noise from toy rewards.
+
+[1]: https://arxiv.org/html/2505.24864v1 "ProRL: Prolonged Reinforcement Learning Expands Reasoning Boundaries in Large Language Models"
+[2]: https://developer.nvidia.com/blog/scaling-llm-reinforcement-learning-with-prolonged-training-using-prorl-v2/?utm_source=chatgpt.com "Scaling LLM Reinforcement Learning with Prolonged ..."
+[3]: https://arxiv.org/html/2505.24864v1?utm_source=chatgpt.com "ProRL: Prolonged Reinforcement Learning Expands ..."
+[4]: https://verl.readthedocs.io/en/latest/examples/config.html?utm_source=chatgpt.com "Config Explanation - verl documentation - Read the Docs"
+[5]: https://docs.nvidia.com/nemo/rl/0.3.0/apidocs/nemo_rl/nemo_rl.algorithms.grpo.html?utm_source=chatgpt.com "nemo_rl.algorithms.grpo — NeMo-RL"
+[6]: https://docs.nvidia.com/nemo/rl/0.3.0/guides/grpo.html "An in-depth Walkthrough of GRPO in NeMo RL — NeMo-RL"
+[7]: https://huggingface.co/docs/trl/main/en/grpo_trainer?utm_source=chatgpt.com "GRPO Trainer"
+[8]: https://arxiv.org/html/2312.07551v1?utm_source=chatgpt.com "Language Model Alignment with Elastic Reset"
