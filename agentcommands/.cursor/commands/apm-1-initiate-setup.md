@@ -37,13 +37,23 @@ Your role is to conduct project discovery and populate the Implementation Plan f
 ## 1 Context Synthesis Step
 **MANDATORY**: You MUST complete ALL Question Rounds in the Context Synthesis Guide before proceeding to Step 2.
 
-1. Read .apm/guides/Context_Synthesis_Guide.md to understand the mandatory Question Round sequence.
-2. Execute ALL Question Rounds in strict sequence:
+1. **Experiment Selection (Pre-Context Synthesis):**
+   - Determine which experiment you are working on:
+     - **If working within an experiment folder** (`experiments/<exp-name>/`): Automatically detect experiment name from current directory
+     - **If creating a new experiment**: Ask user for experiment name and create structure in `experiments/<exp-name>/`
+     - **If at repository root**: Ask user which experiment to work on (existing or new)
+   - Record experiment name and path for use throughout setup
+   - **Noma Integration Check**: Verify that `external/noma/` is accessible from the experiment location (check relative path `../../external/noma/` or absolute path)
+   - If Noma not found, alert user and provide guidance on setup
+
+2. Read .apm/guides/Context_Synthesis_Guide.md to understand the mandatory Question Round sequence.
+3. Execute ALL Question Rounds in strict sequence:
   - **Question Round 1**: Existing Material and Vision (ITERATIVE - complete all follow-ups)
   - **Question Round 2**: Targeted Inquiry (ITERATIVE - complete all follow-ups)
   - **Question Round 3**: Requirements & Process Gathering (ITERATIVE - complete all follow-ups)
   - **Question Round 4**: Final Validation (MANDATORY - present summary and get user approval)
-3. **DO NOT proceed to Step 2** until you have:
+4. **DO NOT proceed to Step 2** until you have:
+  - Completed experiment selection and Noma validation
   - Completed all four Question Rounds
   - Received explicit user approval in Question Round 4
 
@@ -54,7 +64,12 @@ Your role is to conduct project discovery and populate the Implementation Plan f
 ## 2 Project Breakdown & Plan Creation Step
 **ONLY proceed to this step after completing ALL Question Rounds in Step 1.**
 1. Read .apm/guides/Project_Breakdown_Guide.md.
-2. Populate the existing `.apm/Implementation_Plan.md` file, using systematic project breakdown following guide methodology.
+2. **Before populating the plan**, ensure the Implementation Plan header includes:
+   - Experiment name (from Step 1)
+   - Experiment path (relative to repository root: `experiments/<exp-name>/`)
+   - Noma integration status (accessible/not accessible)
+3. Populate the existing `.apm/Implementation_Plan.md` file, using systematic project breakdown following guide methodology.
+4. **Ensure all task paths are relative to the experiment root** (`experiments/<exp-name>/`).
 3. **Immediate User Review Request:** After presenting the initial Implementation Plan, include the exact following prompt to the User in the same response:
 
 "Please review the Implementation Plan for any **major gaps, poor translation of requirements into tasks, or critical issues that need immediate attention**. Are there any obvious problems that should be addressed right now?
@@ -99,10 +114,17 @@ Present the Manager Agent Bootstrap Prompt **as a single markdown code block** f
 ```markdown
 ---
 Workspace_root: <path_to_workspace_root>
+Experiment_name: <experiment_name>
+Experiment_path: <experiments/exp-name>
 ---
 
 # Manager Agent Bootstrap Prompt
 You are the first Manager Agent of this APM session: Manager Agent 1.
+
+## Experiment Context
+- **Experiment Name**: <experiment_name>
+- **Experiment Path**: <experiments/exp-name> (relative to repository root)
+- **Noma Integration**: <accessible/not accessible> at external/noma/
 
 ## User Intent and Requirements
 - Summarize User Intent and Requirements here.
@@ -139,7 +161,7 @@ You are the first Manager Agent of this APM session: Manager Agent 1.
   **Execution**
   10. When Memory Root header is complete, proceed as follows:
     a. Read the first phase from the Implementation Plan.
-    b. Create `Memory/Phase_XX_<slug>/` in the `.apm/` directory for the first phase.
+    b. Create `Memory/experiments/<experiment_name>/Phase_XX_<slug>/` in the `.apm/` directory for the first phase.
     c. For all tasks in the first phase, create completely empty `.md` Memory Log files in the phase's directory.
     d. Once all empty logs/sections exist, issue the first Task Assignment Prompt.
 ```

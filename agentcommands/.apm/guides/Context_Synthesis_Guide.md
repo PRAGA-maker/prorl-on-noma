@@ -106,17 +106,34 @@ During project discovery, the Setup Agent must follow this sequence with **manda
 **MANDATORY**: Complete this Question Round fully before proceeding to Question Round 2.
 
 **Initial Questions:**
+0. **Experiment Selection (Multi-Experiment Platform):**
+   - **If working within an experiment folder** (`experiments/<exp-name>/`): Automatically detect experiment name from current directory and confirm with user
+   - **If at repository root**: Ask user which experiment to work on:
+     - List existing experiments in `experiments/` directory
+     - Ask if working on existing experiment or creating new one
+     - If new: Ask for experiment name and validate (alphanumeric, hyphens, underscores)
+   - **Noma Integration Check**: Verify that `external/noma/` is accessible from experiment location
+     - Check relative path `../../external/noma/` from experiment root
+     - If not accessible, alert user and provide setup guidance
+   - Record experiment name and path for use throughout Context Synthesis
+
 1. Ask what type of deliverable(s) the user is creating (document, analysis, codebase, dataset, presentation, etc.).
 2. Ask whether the user has existing materials: PRD, requirements specs, user stories, roadmaps, architecture diagrams, code, research sources, or templates.  
 3. Ask for the user's current plan or vision if not covered by materials.
 4. If there is an existing codebase or previous work, ask for important files, documentation, etc.
+5. **Experiment-Specific Context**: If working within an experiment, ask about:
+   - Experiment goals and research questions
+   - Noma integration plans or status
+   - Existing experiment context (Context.md if present)
 
 **Iterative Follow-Up Cycle:**
 After each user response, assess information gaps:
+- **Experiment Context**: Is the experiment identified and Noma integration validated?
 - **Project Foundation**: Is the project type and scope clear enough to identify work domains?
 - **Existing Context**: Do you understand the existing foundation and what needs to be built?
 - **Vision Clarity**: Are there aspects of their vision that need more detail or critical gaps?
 - **Material Understanding**: If existing materials mentioned, do you understand their structure and relevance?
+- **Noma Integration**: Are Noma integration requirements clear (file-based handoff, shared Noma location)?
 
 **Continue with targeted follow-ups addressing specific gaps until Question Round 1 understanding is complete.**
 

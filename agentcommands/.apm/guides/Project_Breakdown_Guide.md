@@ -157,11 +157,17 @@ The file already contains a header template with placeholders. You must:
 1. **Read the existing header** in `.apm/Implementation_Plan.md`
 2. **Fill in all header fields**:
    - Replace `<Project Name>` with the actual project name
+   - **Add experiment context** (if working in multi-experiment platform):
+     - Experiment Name: `<experiment_name>` (from Context Synthesis)
+     - Experiment Path: `experiments/<exp-name>/` (relative to repository root)
+     - Noma Integration: `<accessible/not accessible>` at `external/noma/`
    - Replace `[To be filled by Setup Agent before Project Breakdown]` in **Last Modification** field with: "Plan creation by the Setup Agent."
    - Replace `[To be filled by Setup Agent before Project Breakdown]` in **Project Overview** field with a concise summary of the project
 3. **Save the updated header** - This is a dedicated file edit operation that must be completed before any phase content is written
 
 **Only after the header is complete**, proceed to phase cycles (see §4). All phase content will be appended to this file after the header.
+
+**Experiment-Scoped Paths**: All task paths in the Implementation Plan must be relative to the experiment root (`experiments/<exp-name>/`), not the repository root.
 
 ## 4. Phase Cycle Execution
 
@@ -183,7 +189,10 @@ While identifying tasks for this phase, apply these tests for each potential tas
 
 **Present Task List**: After applying guardrails, present **in chat** complete task list for phase: "Task X.1: [Name], Task X.2: [Name]..." before proceeding to individual analysis.
 
-**Ad-Hoc Delegation Precheck:** While listing tasks, quickly flag any task requiring ad-hoc delegation based on retained insights. Use an inline marker after the task name: "(ad-hoc: <purpose>)". Keep it to five words or fewer; no reasoning here.
+**Research Precheck:** While listing tasks, quickly flag any task requiring research:
+- **ChatGPT research**: Use marker "(chatgpt: <purpose>)" for tasks needing web search, literature review, or planning research
+- **Ad-Hoc delegation**: Use marker "(ad-hoc: <purpose>)" for tasks requiring specialized research beyond ChatGPT capabilities
+- Keep markers to five words or fewer; no reasoning here.
 
 ### 4.2. Individual Task Complete Analysis
 **CRITICAL**: Analyze each task from 4.1 individually with complete reasoning before proceeding to next task. Never batch process multiple tasks.**For each identified task, complete the following systematic analysis in chat:**
@@ -222,7 +231,13 @@ Determine appropriate task content:
 - **If Multi-step**: "This needs [X] steps because [workflow dependency analysis]. Each step represents [natural progression]."
 
 **Content Definition:**
-- If flagged in §4.1, first add an ad-hoc delegation step: "Ad-Hoc Delegation – <purpose>" (optional ref to .cursor/commands/apm-7-delegate-research.md or .cursor/commands/apm-8-delegate-debug.md), then continue
+- If flagged in §4.1 as "(chatgpt: <purpose>)", add ChatGPT research step: "ChatGPT Research – <purpose>" (reference .cursor/commands/apm-7-delegate-research.md for ChatGPT-first protocol), then continue
+- If flagged in §4.1 as "(ad-hoc: <purpose>)", add ad-hoc delegation step: "Ad-Hoc Delegation – <purpose>" (optional ref to .cursor/commands/apm-7-delegate-research.md or .cursor/commands/apm-8-delegate-debug.md), then continue
+- **Noma Integration Tasks**: If experiment involves Noma integration, include tasks to:
+  - Verify Noma accessibility from experiment location (`../../external/noma/`)
+  - Set up file-based handoff structure (`noma/` directory)
+  - Create integration interface (safetensors I/O, parameter exchange)
+- **Experiment-Relative Paths**: Ensure all file paths in task instructions are relative to experiment root (`experiments/<exp-name>/`)
 - [Present actual bullets or steps with applied reasoning]
 
 **Task [X.Y] analysis complete** ← State this before proceeding to next task
@@ -262,7 +277,9 @@ Translate completed individual analyses from §4.2-4.3 into structured file form
   - **Single-step**: Unordered list (`-`) for instructions.
   - **Multi-step**: Ordered list (`1.`, `2.`) for sequential steps.
   - **Content**: Steps/bullets derived in your Chat Analysis (§4.2) with additional detail (if needed). Preserve all individual analysis insights, process requirements, and implementation specifications from chat breakdown
+  - **ChatGPT research steps:** prefix with `ChatGPT Research – <Purpose>` as a single line (reference .cursor/commands/apm-7-delegate-research.md); no extended content in file
   - **Ad-Hoc delegation steps:** prefix with `Ad-Hoc Delegation – <Purpose>` as a single line (optional short guide ref); no extended content in file
+  - **Experiment paths:** All file paths must be relative to experiment root (`experiments/<exp-name>/`)
 * **5. Dependency Format:** Add to the `Guidance` field of the Consumer Task:
   - Same-agent: `**Depends on: Task X.Y Output**`
   - Cross-agent: `**Depends on: Task X.Y Output by Agent Z**`

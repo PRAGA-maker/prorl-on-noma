@@ -5,7 +5,9 @@ This guide defines how Manager Agents issue task assignments to Implementation A
 Manager Agent issues Task Assignment Prompt → User passes to Implementation Agent → Implementation Agent executes task and logs work → User returns log to Manager → Manager reviews and determines next action (continue, follow-up, delegate, or plan update).
 
 ## 2. Task Assignment Prompt Format
-Task Assignment Prompts must correlate 1-1 with Implementation Plan tasks and include all necessary context for successful execution. Manager Agent must issue these prompts following this format:
+Task Assignment Prompts must correlate 1-1 with Implementation Plan tasks and include all necessary context for successful execution. Manager Agent must issue these prompts following this format.
+
+**Experiment Context**: All paths in Task Assignment Prompts must be relative to the experiment root (`experiments/<exp-name>/`), not the repository root.
 
 ### 2.1. Dependency Check
 Before creating any Task Assignment Prompt check for task dependencies.
@@ -67,6 +69,12 @@ Implementation Plan: **Task X.Y - [Title]** assigned to **[Agent_<Domain>]**
 - For multi-step tasks: "Complete in X exchanges, one step per response. **AWAIT USER CONFIRMATION** before proceeding to each subsequent step."
 - Transform subtask bullets into actionable instructions specifying: what to do, how to approach it, where to implement, and what constraints/libraries to use
 - Include context from task Objective, Output, and Guidance fields
+- **ChatGPT Research Steps**: If task includes "ChatGPT Research – <purpose>", specify that Implementation Agent should:
+  - Generate ChatGPT prompt in-chat as copy-pasteable markdown block
+  - Wait for user to return ChatGPT response
+  - Identify and follow links in response using browser tools
+  - Extract information from both response and linked pages
+- **Experiment-Relative Paths**: All file paths must be relative to experiment root (`experiments/<exp-name>/`)
 
 ## Expected Output
 - Deliverables: [from Implementation Plan Output field]
@@ -223,8 +231,19 @@ Based on log review, determine appropriate next step:
 - **Partial**: Some progress made, specific issues identified
 - **Blocked**: Cannot proceed without external input or resolution
 
-## 6. Ad-Hoc Delegation Protocol
-Set `ad_hoc_delegation: true` only when Implementation Plan contains explicit delegation steps for the task.
+## 6. Research and Delegation Protocol
+
+### 6.1 ChatGPT Research (Primary Method)
+If Implementation Plan task includes "ChatGPT Research – <purpose>":
+- **Do NOT set `ad_hoc_delegation: true`** for ChatGPT research steps
+- Include instructions in "Detailed Instructions" section for Implementation Agent to:
+  - Generate ChatGPT prompt in-chat as markdown code block
+  - Wait for user to copy to ChatGPT and return response
+  - Process response and follow links using browser tools
+  - Reference .cursor/commands/apm-7-delegate-research.md for ChatGPT-first protocol
+
+### 6.2 Ad-Hoc Delegation (Fallback)
+Set `ad_hoc_delegation: true` only when Implementation Plan contains explicit "Ad-Hoc Delegation – <purpose>" steps for the task.
 
 ### 6.1. Manager Responsibilities  
 When Implementation Plan contains explicit delegation steps, Manager Agents must:
@@ -234,8 +253,9 @@ When Implementation Plan contains explicit delegation steps, Manager Agents must
 - Specify what to delegate and expected deliverables in prompt
 
 **Standard Delegation Command References**:
+- **ChatGPT Research** (Primary): Reference .cursor/commands/apm-7-delegate-research.md for ChatGPT-first protocol
 - **Debug Delegation**: Reference .cursor/commands/apm-8-delegate-debug.md
-- **Research Delegation**: Reference .cursor/commands/apm-7-delegate-research.md  
+- **Ad-Hoc Research Delegation** (Fallback): Reference .cursor/commands/apm-7-delegate-research.md for Ad-Hoc agent workflow
 - **Custom Delegations**: Reference appropriate custom command files if available
 
 ### 6.2. Integration Requirements

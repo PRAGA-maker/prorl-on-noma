@@ -1,3 +1,491 @@
+v2 expirament (read whole doc for context):
+
+I’m going to (1) web-check what “dynamic XOR in TTA” refers to in the NOMA context, (2) inspect the NOMA repo to see how realloc/optimizer-state preservation is implemented, and (3) propose concrete, principled optimizer-state transforms (beyond keep/reset) that could matter for ProRL-style resets.
+
+
+Below is a “give-this-to-coding-agents” document: **what’s actually going on (ProRL v2 + KL resets), what’s expensive vs not, what NOMA’s *real* advantage is (stateful memory + optimizer-state semantics under topology changes), what you should build, and what required web search**.
+
+I’m going to be very explicit about (a) facts grounded in sources, (b) reasonable engineering inferences, and (c) speculative extensions.
+
+---
+
+# NOMA × ProRL(v2) Wedge: what’s real, what’s expensive, and what NOMA can uniquely prove
+
+## 0) Goal of this document (for coding agents)
+
+Coding agents can implement systems, but they typically miss:
+
+* **what ProRL v2 actually resets** and *why*,
+* what the **dominant compute cost** is (and isn’t),
+* what the **KL estimator requires** (data dependencies),
+* how **existing RLHF stacks** structure “actor/ref/old logprobs” and where caching naturally lives,
+* what NOMA’s **unique capability** is (it’s *not* “a faster copy”; it’s “explicit, mechanically-defined state transforms under realloc/topology changes”).
+
+This doc gives you:
+
+1. the conceptual wedge,
+2. the “what to implement” scope,
+3. the web-researched facts you should forward to agents,
+4. the repository + code context from the last implementation (the zip you have).
+
+---
+
+## 1) What the wedge is (one sentence)
+
+**Show that treating “reference/old-policy statistics + optimizer state” as first-class, explicitly-managed buffers (à la NOMA) eliminates avoidable reference recomputation and enables *controlled state resets/retention* that PyTorch makes brittle—especially once you add topology changes (grow/shrink) or selective optimizer washout.**
+
+That splits naturally into two tiers:
+
+### Tier A (minimal, “one-shot” plausible)
+
+**Make the reference forward “not multiply” with PPO epochs / minibatches** by caching the required reference terms once per rollout and reusing them correctly.
+
+This is a wedge because many systems *accidentally* recompute reference quantities multiple times (or re-materialize buffers wastefully), and you can show a clear speed/step-time delta on a small benchmark.
+
+### Tier B (the “NOMA-unique” wedge that your message is pointing at)
+
+**Implement “stateful reset semantics”**: not just keep/reset optimizer state, but **selectively transform it** (soft reset / washout / diagonalized second-order surrogates / growth-aware mapping) at “reference reset” boundaries or “capacity growth” boundaries.
+
+This is where NOMA actually has teeth: NOMA explicitly frames dynamic topology and asks “what happens to optimizer state when parameters are grown or remapped?” and highlights that this is painful/error-prone in standard frameworks. ([GitHub][1])
+
+---
+
+## 2) What ProRL v2 is doing with KL regularization + resets (facts)
+
+From NVIDIA’s ProRL v2 writeup:
+
+* They use **KL-regularized trust regions** with **periodic reference resets**. ([NVIDIA Developer][2])
+* The KL regularization they describe uses a **k₂ estimator** involving a ratio between the **reference policy** and the **old policy** log-probabilities (they explicitly define (x = \exp(\mathrm{clamp}(\log(\pi_\text{ref}/\pi_{\text{old}}))))). ([NVIDIA Developer][2])
+* **Reset cadence:** “Every 200–500 RL steps (or upon KL spikes/stalled validation), the reference policy is reset to the current policy; optimizer state is not cleared.” ([NVIDIA Developer][2])
+
+So in ProRL v2, the reset event is **not** “reset the optimizer”; it’s primarily “update the anchor (reference policy) to a newer checkpoint” to prevent being constrained by an outdated anchor. ([NVIDIA Developer][2])
+
+### Important: ProRL (v1 paper) differs
+
+The original ProRL paper (arXiv html) describes a reset that **reinitializes optimizer states** when they reset to the best policy checkpoint. ([arXiv][3])
+So when you talk to agents: **be precise whether you’re matching ProRL v1 (optimizer reset) or ProRL v2 (optimizer not cleared).**
+
+This matters because it changes what your “optimizer state wedge” is:
+
+* For **v2**, the wedge is *not* “they reset optimizer and we don’t” (they already don’t).
+* For **v1**, the wedge could be “full reset is too blunt; do selective washout instead.”
+
+---
+
+## 3) What is being reset? (disambiguation that agents must internalize)
+
+There are *at least* 4 distinct “states” people conflate:
+
+### (S1) Reference policy parameters (π_ref)
+
+Reset = **set π_ref ← π_current(best)** periodically.
+This is what ProRL v2 explicitly describes.
+
+### (S2) Old policy statistics (π_old logprobs)
+
+In PPO-style updates, you usually keep π_old fixed across the K epochs/minibatches for a rollout batch (or across a “mini-iteration”). ProRL v2’s KL ratio explicitly uses π_old vs π_ref.
+So you need **logp_old** available at update time.
+
+### (S3) Optimizer state (Adam moments / momentum / second-moment)
+
+This is the thing you’re pointing at with “dynamic XOR / preserve optimizer state.”
+
+* ProRL v2 says optimizer state is **not cleared** at reference reset.
+* ProRL v1 describes reinitializing optimizer state at reset.
+
+### (S4) Cached auxiliary tensors (reference logprobs, values, advantages, etc.)
+
+These are not “optimizer state,” but they are the *main mechanism* to avoid redundant computation: if you compute reference logprobs once per rollout, you shouldn’t recompute them each epoch.
+
+If agents mix up (S1)-(S4), they will design the wrong benchmark.
+
+---
+
+## 4) What’s expensive vs what isn’t (the cost model agents should use)
+
+### 4.1 The expensive part is the *reference forward*, not the reset event
+
+Almost every RLHF PPO-style recipe computes token logprobs under:
+
+1. the trainable policy, and
+2. a reference policy,
+   then uses the KL between them as regularization. TRL’s PPO trainer docs spell out that optimization computes logprobs with the trained model and a reference model to form a KL divergence signal.
+   The RLHF book similarly describes a frozen initial model computing log-probabilities on the same text to compute a KL penalty.
+
+**Compute implication:** a reference model forward pass is “one extra forward pass” over the sequence(s) you train on. That’s not free.
+
+### 4.2 The reset event itself (copying / swapping π_ref) is usually cheap amortized
+
+Resetting π_ref every 200–500 steps means you do an occasional parameter copy/update; amortized over hundreds of steps, it’s small relative to constant per-step reference forward.
+
+If someone tells you “the reset is expensive,” they’re usually confusing:
+
+* the **ongoing cost** (reference forward each rollout or minibatch) vs
+* the **occasional event** (update π_ref weights).
+
+### 4.3 Where “NOMA might save compute” is *not* in copying weights
+
+If your wedge is “NOMA makes the reset copy faster,” that’s weak and probably unconvincing.
+The convincing wedge is:
+
+* **avoid redundant recomputation** (reference forward multiplied by epochs),
+* **stabilize memory/buffer management** so you don’t reallocate/reshard unpredictably,
+* **enable explicit state transforms** when shapes/topology change.
+
+---
+
+## 5) Why your “dynamic XOR / TTA” point matters (and what it really implies)
+
+NOMA’s own README frames dynamic topology as:
+
+* make parameters explicit buffers (`alloc/realloc/free`),
+* and **mechanically define what happens to optimizer state** when topology changes.
+
+They explicitly highlight that **standard frameworks don’t handle “evolving topology” cleanly**, and that “existing optimizer state is preserved… leading to faster convergence… than reinitialization.”
+
+That’s your “dynamic XOR” intuition: if the model grows, **keeping optimizer moments for the *old* parameters** makes the system continue learning instead of “forgetting how to step.”
+
+### The key translation to ProRL:
+
+ProRL’s reference reset (π_ref update) does *not* change topology. So NOMA’s “topology advantage” doesn’t automatically apply.
+
+To make NOMA’s optimizer-state superpower relevant, you need at least one of:
+
+1. **selective optimizer state transforms** at reset boundaries (even without topology change), or
+2. **capacity/topology adaptation during prolonged RL** (e.g., grow LoRA rank / add features / widen layers) triggered by stagnation / KL spikes / reset events.
+
+That’s the principled bridge between “dynamic XOR keeps learning” and “ProRL resets.”
+
+---
+
+## 6) What existing implementations already do (and where your wedge actually is)
+
+### 6.1 Many libraries already cache “old logprobs”
+
+PPO requires old policy logprobs; it’s standard to compute them at rollout time and reuse.
+
+### 6.2 Reference logprobs: libraries vary
+
+Some compute reference logprobs once per rollout batch and reuse.
+Some accidentally recompute per epoch or per minibatch (especially in naive baselines or when mixing distributed roles).
+
+**Your earlier repo (the zip you have) explicitly includes both modes**:
+
+* `naive_ref_each_epoch=True` = intentionally bad baseline (recompute reference logprobs during every PPO epoch/minibatch).
+* cached reference logprobs computed during rollout = better baseline.
+
+This is a good benchmark pattern because it creates a measurable gap on small models.
+
+### 6.3 ProRL v2’s KL ratio uses π_ref / π_old
+
+This is important: the k₂ estimator they write uses π_ref and π_old, not necessarily π_ref and π_current directly.
+So your cache should (at minimum) keep:
+
+* `logp_old` (behavior policy at rollout),
+* `logp_ref` (reference anchor at rollout time, or computed once per rollout),
+* and then the current policy logp is recomputed during training (that’s necessary).
+
+---
+
+## 7) The “how can NOMA avoid the extra reference forward?” question (principled answers)
+
+You asked this earlier and it’s easy to answer sloppily, so here’s the precise breakdown.
+
+### Option 1 (standard + correct): **compute reference logprobs once per rollout, reuse across PPO epochs**
+
+This does **not eliminate** the reference forward completely, but it ensures it happens at most once per rollout batch.
+
+This is the minimal wedge and is what your current repo demonstrates.
+
+**What NOMA contributes:** treat the cached `logp_ref` buffer as a first-class alloc/realloc-managed artifact rather than an ad-hoc tensor that gets rematerialized or copied across devices.
+
+### Option 2 (stronger): **move reference evaluation to rollout workers and never do it in the optimizer loop**
+
+In distributed RLHF, you often have rollout engines and training engines. If the rollout stage can compute `logp_ref` (teacher forcing on the generated sequences), then the training loop never runs the reference model at all. (It just consumes cached `logp_ref`.)
+
+This can be meaningful when your training engine is already saturated and reference forward steals capacity.
+
+**But** it still requires a reference forward somewhere. It’s just relocated.
+
+### Option 3 (actually “avoid reference forward”): **replace π_ref with a surrogate that doesn’t require a model forward**
+
+This is where you must be honest: you’re approximating.
+
+Three principled-ish surrogates:
+
+1. **Behavior trust region**: penalize KL(π_current || π_old) instead of KL to π_ref. Your repo’s Variant B does this. It eliminates the reference model entirely, but changes the algorithm.
+2. **Periodic anchor logprobs only**: at reset time, compute and store a “reference logprob table” for a fixed evaluation set and use it for a partial penalty. This is weak unless you carefully justify why it regularizes the relevant distribution.
+3. **Local quadratic / Fisher surrogate**: approximate KL to reference using a curvature estimate around π_ref, so you don’t need π_ref forward each time. This is researchy and needs careful math + validation.
+
+If you want a wedge that’s “one-shot to code,” Option 1/2 is the realistic path.
+
+---
+
+## 8) Optimizer-state “washout” (what you’re gesturing at, made concrete)
+
+You described:
+
+* “preserve optimizer state and not reset it”
+* “washout old directions”
+* “second-order diagonalized on the fly”
+* “log learning rate schedules work on this”
+
+Here’s a principled, implementable translation.
+
+### 8.1 Define the event: when do we apply washout?
+
+Candidate triggers:
+
+* every reference reset (every 200–500 steps),
+* or when KL spikes / stalled validation (also mentioned by NVIDIA),
+* or when reward plateaus.
+
+### 8.2 Define the transform family on optimizer state
+
+For Adam-like optimizers with `m` (first moment) and `v` (second moment):
+
+**Hard reset**: `m ← 0, v ← 0`
+**Keep**: no change
+**Soft reset (scalar)**: `m ← α m, v ← α v` with α ∈ (0,1)
+**Asymmetric washout** (often more sensible):
+
+* `m ← α m` but keep `v` (or vice versa), because `v` encodes curvature/scale and `m` encodes direction/momentum.
+
+**Diagonal-second-order pivot**: interpret `1/sqrt(v)` as diagonal preconditioner; you can keep `v` but reduce `m` so you keep stable step scaling but forget stale direction.
+
+These are easy to implement and easy to ablate.
+
+### 8.3 Why NOMA matters here (vs “PyTorch can do it too”)
+
+If you **never change topology**, PyTorch can absolutely apply these transforms. So NOMA doesn’t win by default.
+
+NOMA wins when either:
+
+* you want to formalize “reset semantics” as part of a general compute graph / compiled pipeline, or
+* you introduce **topology change** (next section), where mapping optimizer state across a structural change becomes painful.
+
+So: implement washout anyway (it’s useful), but don’t oversell it as NOMA-exclusive unless you add topology change.
+
+---
+
+## 9) The real NOMA-native experiment (if you want something genuinely “Torch can’t do cleanly”)
+
+### 9.1 Add a **tiny topology adaptation** to prolonged RL
+
+Trigger: at the same cadence as reference resets or stagnation.
+
+Examples that are *still scoped*:
+
+* **Grow a low-rank adapter** (increase LoRA rank) in one module.
+* **Widen one MLP layer** by adding neurons.
+* **Add a small “policy head expansion”** (extra hidden units) on a toy model.
+
+### 9.2 The core requirement: preserve optimizer state for the *old* slice
+
+When you grow parameters, you want:
+
+* existing weights keep their optimizer moments,
+* new weights get fresh moments (zero/init),
+* any remapping is explicit.
+
+This is precisely the “dynamic XOR converges faster because optimizer state is preserved” argument NOMA makes.
+
+### 9.3 Why this is a strong wedge
+
+Because in plain PyTorch, doing growth “correctly” requires:
+
+* constructing new parameters,
+* copying old weight values into the new tensor,
+* and correctly migrating optimizer state (m, v) keyed by parameter objects (which often breaks silently).
+
+NOMA’s whole pitch is that realloc is a primitive and optimizer-state semantics are defined.
+
+So if you want a wedge that makes people say “okay, that’s actually different,” this is it.
+
+---
+
+## 10) What you already have in the “prol-noma-wedge2” repo (previous design decisions)
+
+This is what your agents should know about the last implementation so they don’t reinvent or misunderstand it.
+
+### 10.1 What it benchmarks
+
+A small PPO-style loop with:
+
+* a **policy model** (tiny GRU LM),
+* an optional **reference model**,
+* a toy task (“reverse_digits” etc),
+* counters tracking:
+
+  * policy forwards during rollout + training,
+  * reference forwards.
+
+### 10.2 The intended “reference forward multiplier” bug
+
+There is a deliberate switch:
+
+* `naive_ref_each_epoch=True` recomputes reference logprobs during each PPO epoch/minibatch (expensive baseline).
+* otherwise it computes `ref_logp` once per rollout and reuses it.
+
+This isolates the “unnecessary recomputation” wedge.
+
+### 10.3 It already includes optimizer reset semantics
+
+`optimizer_reset ∈ {keep, hard, soft}` where soft multiplies Adam moments by a factor.
+
+That directly maps to the “washout” family above.
+
+### 10.4 NOMA integration was intentionally stubbed
+
+Your `INTEGRATION_TO_NOMA.md` basically said:
+
+* “the wedge is explicit cached buffers + reset semantics,”
+* “for real NOMA, implement cache allocation + reuse through NOMA alloc/realloc or similar abstractions.”
+
+So your agents should treat the repo as a harness and slot in NOMA primitives, not rewrite the algorithm from scratch.
+
+---
+
+## 11) Search-required findings you should forward verbatim-ish to coding agents (so they don’t need search)
+
+This is the part you explicitly asked for: **everything that required search and is important context**.
+
+### 11.1 ProRL v2 reset behavior (NVIDIA blog)
+
+Key facts:
+
+* ProRL v2 uses **KL-regularized trust regions** with **periodic reference resets**.
+* They describe a **k₂ estimator** that depends on (\pi_\text{ref}) and (\pi_{\text{old}}) (ratio inside a clamp).
+* Reset cadence: **every 200–500 RL steps** or on **KL spikes / stalled validation**; **reference reset to current policy**; **optimizer state not cleared**.
+
+### 11.2 ProRL v1 (paper) differs on optimizer reset
+
+The ProRL paper describes resetting to the best checkpoint and **reinitializing optimizer state** at reset.
+
+Agents must not mix these up.
+
+### 11.3 NOMA’s claim about optimizer state + dynamic topology
+
+NOMA frames dynamic topology as alloc/realloc/free for parameter buffers and explicitly calls out the need to define optimizer-state behavior; it states that preserving optimizer state across realloc leads to faster reconvergence in their XOR growth demo.
+
+### 11.4 Reference model forward is “standard RLHF cost”
+
+TRL’s PPO trainer describes that optimization computes logprobs with the trained model **and a reference model** and uses KL divergence to prevent drift.
+RLHF book similarly describes a frozen initial model computing log-probabilities on the same text to calculate a KL penalty.
+
+These are the conceptual basis for “reference forward is a real cost center.”
+
+### 11.5 (Optional background) KL estimator discussion
+
+There’s active work on KL-regularized policy gradient design and token-level KL penalties (k₂-style estimators show up in modern RLVR stacks). One recent OpenReview paper explicitly discusses KL-regularized policy gradient design and mentions k₂/token-level KL penalties in the LLM RL context.
+
+(Agents don’t need to read it to code the harness, but it supports “this is real, not made up.”)
+
+---
+
+## 12) Concrete “what to build next” (so agents can execute)
+
+### Phase 1 (fast, scoped): reproduce the wedge cleanly
+
+Implement (or keep) these variants on the small harness:
+
+**Variant A0 (bad baseline)**
+
+* recompute reference logprobs every PPO epoch/minibatch (`naive_ref_each_epoch=True`)
+
+**Variant A1 (good baseline / correct caching)**
+
+* compute reference logprobs once per rollout batch; store; reuse.
+
+**Variant A2 (buffer-stability / NOMA-ish)**
+
+* implement a persistent “reference logprob ring buffer” abstraction:
+
+  * preallocate max size,
+  * reuse without realloc,
+  * support slicing/batching without copies.
+
+Even if this is implemented in PyTorch first, it’s the object that maps to NOMA alloc/realloc.
+
+**Metrics**:
+
+* wall clock per step,
+* counts of reference forwards,
+* peak memory if measurable,
+* reward curves / KL curves.
+
+### Phase 2 (the optimizer-state part you actually care about)
+
+On top of A1/A2, add:
+
+**Reset semantics ablation** (at reference reset boundaries):
+
+* keep optimizer state (ProRL v2 style)
+* hard reset (ProRL v1 style)
+* soft washout (α on m/v)
+* asymmetric washout (reset m, keep v)
+
+**Key measurement**: stability after resets (KL spikes, reward collapse, recovery speed).
+
+### Phase 3 (the real NOMA “dynamic XOR” bridge)
+
+Add one controlled topology change:
+
+* e.g., widen a tiny layer by +K units every N resets
+* preserve optimizer state for existing slice, init new slice
+
+Then compare:
+
+* naive PyTorch “new params” (state migration mistakes happen easily),
+* correct PyTorch state migration (painful but doable),
+* NOMA-style realloc semantics (the conceptual target).
+
+This is the only phase where you can honestly claim “NOMA enables something Torch makes brittle,” aligned with NOMA’s own story.
+
+---
+
+## 13) If the research changes the experiment (your explicit request)
+
+Yes: **the NVIDIA ProRL v2 writeup explicitly says optimizer state is not cleared at reference resets**.
+So if your earlier mental model was “they reset reference *and* optimizer,” that’s **not** ProRL v2.
+
+**Implication:**
+
+* The strongest ProRL v2-aligned wedge is **reference-stat caching/bufferization** and avoiding redundant reference computation.
+* The strongest optimizer-state wedge is either:
+
+  * aligning to **ProRL v1** (which resets optimizer), or
+  * adding **topology changes** so optimizer-state semantics actually matter in a way that’s not trivial in PyTorch.
+
+---
+
+## 14) The “insanely grounded” narrative you can tell in a writeup / PR
+
+If you want something that reads like a serious experiment and not vibes:
+
+1. ProRL v2 uses KL trust regions and periodically resets π_ref (every 200–500 steps) without clearing optimizer state.
+2. KL regularization in RLHF commonly requires reference logprobs, which implies extra reference forward compute.
+3. Many implementations accidentally amplify that cost by recomputing reference quantities inside inner optimization loops. (Your harness demonstrates this with A0 vs A1.)
+4. NOMA’s alloc/realloc framing makes “policy statistics as persistent buffers” and “optimizer-state semantics under evolution” a first-class design axis; it explicitly calls out preserving optimizer state under realloc as beneficial (XOR demo).
+5. Therefore, we benchmark:
+
+   * reference-forward recomputation elimination (A0 → A1 → A2),
+   * optimizer-state reset semantics (keep/hard/soft),
+   * and (optionally) topology growth with optimizer-state preservation (the true NOMA-native case).
+
+That’s principled, testable, and doesn’t rely on magical claims.
+
+---
+
+If you want, paste whatever your agents produce (timings + curves + any surprising failure mode). I’ll help you diagnose whether the effect is real, whether the benchmark is fair, and what the next tight ablation should be.
+
+[1]: https://github.com/pierridotite/NOMA "GitHub - pierridotite/NOMA: A systems programming language where automatic differentiation is a compiler pass and model parameters are explicit, growable memory."
+[2]: https://developer.nvidia.com/blog/scaling-llm-reinforcement-learning-with-prolonged-training-using-prorl-v2/ "Scaling LLM Reinforcement Learning with Prolonged Training Using ProRL v2 | NVIDIA Technical Blog"
+[3]: https://arxiv.org/html/2505.24864v1?utm_source=chatgpt.com "ProRL: Prolonged Reinforcement Learning Expands ..."
+
+
+
+
 Context:
 Below is a “single source of truth” doc for your coding agents. It focuses on the parts that are hard to infer from code alone: the real wedge, what is/isn’t possible, what needs web verification, and the experiment + repo design decisions that matter.
 
@@ -1077,3 +1565,4 @@ If you come back with early curves (even toy), I can tell you quickly whether yo
 [6]: https://docs.nvidia.com/nemo/rl/0.3.0/guides/grpo.html "An in-depth Walkthrough of GRPO in NeMo RL — NeMo-RL"
 [7]: https://huggingface.co/docs/trl/main/en/grpo_trainer?utm_source=chatgpt.com "GRPO Trainer"
 [8]: https://arxiv.org/html/2312.07551v1?utm_source=chatgpt.com "Language Model Alignment with Elastic Reset"
+

@@ -260,7 +260,88 @@ Ad-Hoc agent delegation occurs in two scenarios during task execution:
 
 ---
 
-## 6 Memory System Responsibilities
+## 6 ChatGPT Prompt Generation Protocol
+**CRITICAL**: This is the PRIMARY research method. Ad-Hoc delegation is a fallback when ChatGPT research is insufficient.
+
+### When to Generate ChatGPT Prompts
+Generate ChatGPT prompts automatically when you identify research needs during task execution:
+- Web search needed (current documentation, APIs, best practices)
+- Literature review (papers, implementations, methodologies)
+- Experiment planning (hypothesis validation, methodology design)
+- Technical research (compatibility, integration patterns, current state of tools)
+
+### ChatGPT Prompt Generation Workflow
+
+1. **Identify Research Need**: During task execution, determine that external research is required
+2. **Generate Prompt In-Chat**: Create a copy-pasteable markdown code block directly in your chat response (NEVER create a file)
+3. **Present with User Instructions**: Include clear instructions: "Copy the prompt below and paste it into ChatGPT. Return ChatGPT's response here."
+4. **Wait for User Response**: User will copy prompt, paste into ChatGPT, and return the response
+5. **Process ChatGPT Response**:
+   - Parse the response text and extract key information
+   - **Identify all URLs/links** in the ChatGPT response
+   - **Use browser tools** (`mcp_cursor-ide-browser_browser_navigate`, `browser_snapshot`) to follow links and gather additional information
+   - Extract information from both the ChatGPT response text and linked pages
+6. **Integrate Findings**: Apply research findings to task execution
+7. **Log Research**: Document the complete research process (prompt, response, links followed, findings) in Memory Log
+
+### Prompt Format Template
+
+When generating a ChatGPT prompt, use this structure:
+
+```markdown
+# Research Request: [Topic]
+
+## Context
+[What you are working on and why research is needed]
+
+## Research Questions
+1. [Specific question 1]
+2. [Specific question 2]
+...
+
+## Expected Information
+- [Type of information needed]
+- [Sources to check (if known)]
+- [How information will be used]
+
+## Instructions for ChatGPT
+Please provide current information from authoritative sources. Include links to documentation, papers, or codebases when available.
+```
+
+### Browser Tool Integration
+**MANDATORY**: When ChatGPT provides links in its response:
+- Extract all URLs from the response
+- Use `mcp_cursor-ide-browser_browser_navigate` to open each relevant link
+- Use `mcp_cursor-ide-browser_browser_snapshot` to capture page content
+- Extract key information from linked pages
+- Integrate information from both ChatGPT response and linked pages
+
+### Fallback to Ad-Hoc Delegation
+If ChatGPT research (including following links) is insufficient:
+- Document what was found and what gaps remain
+- Proceed with Ad-Hoc delegation using `.cursor/commands/apm-7-delegate-research.md` or `.cursor/commands/apm-8-delegate-debug.md` as appropriate
+
+### Memory Logging Requirements
+When logging ChatGPT research in Memory Log:
+- Document the research prompt generated
+- Include ChatGPT's response (summary or key points)
+- List all links followed and information extracted
+- Note how findings were integrated into task execution
+- Mark `important_findings: true` if research revealed critical information
+
+### Example Workflow
+
+**Task requires current API documentation:**
+1. Generate ChatGPT prompt in-chat as markdown block
+2. User copies to ChatGPT, returns response with links
+3. Agent follows links using browser tools
+4. Agent extracts API details from linked documentation
+5. Agent integrates API information into implementation
+6. Agent logs: prompt, response, links followed, findings, integration
+
+---
+
+## 7 Memory System Responsibilities
 **Immediately read .apm/guides/Memory_Log_Guide.md.** Complete this reading **in the same response** as your initiation confirmation.
 
 From the contents of the guide:
@@ -272,7 +353,7 @@ Logging all work in the Memory Log specified by each Task Assignment Prompt usin
 
 ---
 
-## 7  Handover Procedures
+## 8  Handover Procedures
 When you receive a **Handover Prompt** instead of a Task Assignment Prompt, you are taking over from a previous Implementation Agent instance that approached context window limits.
 
 ### Handover Context Integration
@@ -287,12 +368,13 @@ When you receive a **Handover Prompt** instead of a Task Assignment Prompt, you 
 
 ---
 
-## 8  Operating Rules
+## 9  Operating Rules
 - Follow section §3 Error Handling & Debug Delegation Protocol - **MANDATORY:** Delegate debugging after exactly 3 failed attempts.
 - Reference guides only by filename; never quote or paraphrase their content.
 - Strictly follow all referenced guides; re-read them as needed to ensure compliance.
 - Immediately pause and request clarification when task assignments are ambiguous or incomplete.
-- Delegate to Ad-Hoc agents only when explicitly instructed by Task Assignment Prompts or deemed necessary.
+- **ChatGPT-First Research**: Generate ChatGPT prompts automatically when research is needed. Use Ad-Hoc delegation only as fallback.
+- Delegate to Ad-Hoc agents only when explicitly instructed by Task Assignment Prompts or when ChatGPT research is insufficient.
 - Report all issues, blockers, and completion status to Log and User for Manager Agent coordination.
 - Maintain focus on assigned task scope; avoid expanding beyond specified requirements.
 - Handle handover procedures according to section §7 when receiving Handover Prompts.

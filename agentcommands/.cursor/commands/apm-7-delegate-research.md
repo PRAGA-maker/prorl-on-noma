@@ -5,11 +5,76 @@ description: Provides the template for delegating a research task to an Ad-Hoc a
 ---
 
 # APM 0.5.3 - Research Delegation Guide
-This guide defines how Implementation Agents delegate research work to Ad-Hoc Research agents. Use this guide when encountering knowledge gaps about current documentation, APIs, SDKs, or technical specifications required for task completion.
+This guide defines how Implementation Agents conduct research. **ChatGPT prompt generation is the PRIMARY research method.** Ad-Hoc Research agent delegation is a FALLBACK when ChatGPT research is insufficient.
 
 ---
 
-## 1  Delegation Workflow Overview
+## 1  ChatGPT-First Research Protocol
+**CRITICAL**: Always attempt ChatGPT research before Ad-Hoc delegation.
+
+### When to Use ChatGPT Research
+Generate ChatGPT prompts automatically when you need:
+- Current documentation, APIs, or SDK information
+- Literature review (papers, implementations, methodologies)
+- Best practices or technical specifications
+- Compatibility or integration information
+- Experiment planning or hypothesis validation
+
+### ChatGPT Prompt Generation Workflow
+
+1. **Identify Research Need**: Determine that external research is required for task completion
+2. **Generate Prompt In-Chat**: Create a copy-pasteable markdown code block directly in your chat response (NEVER create a file)
+3. **Present with User Instructions**: Include: "Copy the prompt below and paste it into ChatGPT. Return ChatGPT's response here."
+4. **Wait for User Response**: User copies prompt, pastes into ChatGPT, returns response
+5. **Process ChatGPT Response**:
+   - Parse response text and extract key information
+   - **Identify all URLs/links** in ChatGPT response
+   - **Use browser tools** (`mcp_cursor-ide-browser_browser_navigate`, `browser_snapshot`) to follow links
+   - Extract information from both ChatGPT response and linked pages
+6. **Integrate Findings**: Apply research to task execution
+7. **Log Research**: Document prompt, response, links followed, and findings in Memory Log
+
+### ChatGPT Prompt Template
+
+```markdown
+# Research Request: [Topic]
+
+## Context
+[What you are working on and why research is needed]
+
+## Research Questions
+1. [Specific question 1]
+2. [Specific question 2]
+...
+
+## Expected Information
+- [Type of information needed]
+- [Sources to check (if known)]
+- [How information will be used]
+
+## Instructions for ChatGPT
+Please provide current information from authoritative sources. Include links to documentation, papers, or codebases when available.
+```
+
+### Browser Tool Integration
+**MANDATORY**: When ChatGPT provides links:
+- Extract all URLs from response
+- Use `mcp_cursor-ide-browser_browser_navigate` to open relevant links
+- Use `mcp_cursor-ide-browser_browser_snapshot` to capture page content
+- Extract information from linked pages
+- Integrate information from both ChatGPT response and linked pages
+
+### When to Fall Back to Ad-Hoc Delegation
+Proceed to Ad-Hoc delegation (Section 2) only if:
+- ChatGPT research (including following links) is insufficient
+- Research requires specialized tools or access not available to ChatGPT
+- Multiple iterative research cycles are needed with complex follow-up questions
+- Research needs exceed ChatGPT's capabilities
+
+---
+
+## 2  Ad-Hoc Delegation Workflow Overview
+**Use this only when ChatGPT research is insufficient.**
 Ad-Hoc Research agents operate in **separate chat sessions** managed by the delegating Implementation Agent:
 
 ### Branch Management
@@ -103,8 +168,10 @@ When the User returns with the Ad-Hoc Agent's findings follow these steps:
 
 ### Memory Logging Requirements
 Document in task Memory Log:
-- **Research Rationale**: Why research was delegated and what information was needed
-- **Session Summary**: Number of attempts and key findings discovered
+- **Research Method**: ChatGPT research OR Ad-Hoc delegation (specify which)
+- **Research Rationale**: Why research was needed and what information was required
+- **ChatGPT Research** (if used): Prompt generated, response received, links followed, findings extracted
+- **Ad-Hoc Delegation** (if used): Session summary, number of attempts, key findings
 - **Information Applied**: How research findings were integrated into task completion
 - **Session Status**: Closed with adequate information OR escalated with session reference
 
